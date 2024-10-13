@@ -50,7 +50,7 @@ We provide detailed information on the creation and preprocessing of this datase
 
 
 ## Pre-training REGENT
-Pre-train REGENT on the REGENT dataset with data from all four environment suites.
+Pre-train REGENT on the REGENT dataset with data from all four environment suites. We use two GPUs.
 ```
 HF_DATASETS_OFFLINE=True \
 accelerate launch --main_process_port=29501 scripts_regent/train_jat_regent_tokenized.py \
