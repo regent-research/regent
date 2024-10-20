@@ -22,6 +22,20 @@ Follow the instructions at [visual_features/resnet18/README.md](visual_features/
 The list of unseen tasks are the keys of the dict here: [regent/eval/rl/core.py](regent/eval/rl/core.py).
 The list of all tasks (training and unseen) are the keys of the dict here: [jat/eval/rl/core.py](jat/eval/rl/core.py).
 
+## JAT Dataset
+Download the original JAT (tokenized) dataset as follows. This dataset is used for retrieval when evaluating our Retrieve and Play (R&P) and REGENT agents.
+```
+python scripts_regent/download_all_jat_datasets.py
+```
+
+## REGENT Dataset
+Download the REGENT dataset (in parquet files) from huggingface and save as bin files locally with one command as follows. This dataset is used for computing the distance normalization value when evaluating agents and also used for pre-training REGENT.
+```
+python scripts_regent/download_all_regent_datasets_and_convert_parquet_files_to_bin_files.py
+```
+We provide detailed information on the creation and preprocessing of this dataset in [scripts_preprocessing/README.md](scripts_preprocessing/README.md).
+
+
 ## Evaluating Retrieve and Play (R&P)
 Evaluate our simple 1 nearest neighbor baseline for a TASK (e.g. metaworld-door-lock), with NUM_DEMOS (e.g. 100) to retrieve from, for NUM_EPS (e.g. 100) rollouts.
 ```
@@ -39,14 +53,6 @@ python -u scripts_regent/eval_jat_regent.py \
     --tasks ${TASK} --num_demos ${NUM_DEMOS} --num_episodes ${NUM_EPS}
 ```
 If you choose an atari-* task, please add `--sticky_p 0.05` if you'd like sticky probability in the environment.
-
-
-## REGENT Dataset
-Download the (parquet) data from huggingface and save as bin files locally.
-```
-python scripts_regent/download_all_regent_datasets_and_convert_parquet_files_to_bin_files.py
-```
-We provide detailed information on the creation and preprocessing of this dataset in [scripts_preprocessing/README.md](scripts_preprocessing/README.md).
 
 
 ## Pre-training REGENT
