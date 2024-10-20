@@ -29,7 +29,7 @@ python scripts_regent/download_all_jat_datasets.py
 ```
 
 ## REGENT Dataset
-Download the REGENT dataset (in parquet files) from huggingface and save as bin files locally with one command as follows. This dataset is used for computing the distance normalization value when evaluating agents and also used for pre-training REGENT.
+Download the REGENT dataset (in parquet files) from huggingface and save as bin files locally with one command as follows. This dataset is used for computing the distance normalization value when evaluating agents. It also contains the subset of the JAT dataset used for pre-training REGENT.
 ```
 python scripts_regent/download_all_regent_datasets_and_convert_parquet_files_to_bin_files.py
 ```
