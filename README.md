@@ -104,6 +104,75 @@ accelerate launch --main_process_port=${PORT} scripts_regent/train_jat_regent_to
 ```
 
 
+## Pre-training JAT/Gato
+Pre-train JAT/Gato on the REGENT dataset.
+```
+HF_DATASETS_OFFLINE=True \
+accelerate launch scripts_jat_regent/train_jat_tokenized.py \
+--output_dir checkpoints/jat \
+--model_name_or_path jat-project/jat \
+--tasks atari babyai metaworld mujoco \
+--run_name train_jat \
+--save_safetensors false \
+--trust_remote_code \
+--per_device_train_batch_size 20 \
+--gradient_accumulation_steps 2 \
+--save_steps 10000 \
+--logging_steps 100 \
+--logging_first_step \
+--dispatch_batches False \
+--dataloader_num_workers 16 \
+--max_steps 25000 \
+--use_same_data_as_REGENT true
+```
+
+Evaluate on TASK for for NUM_EPS rollouts.
+```
+python -u scripts_jat_regent/eval_jat.py \
+--model_name_or_path checkpoints/jat/checkpoint-25000 \
+--tasks ${TASK} --num_episodes ${NUM_EPS} --trust_remote_code
+```
+If you choose an atari-* task, please add `--sticky_p 0.05` if you'd like sticky probability in the environment.
+
+
+## Parameter-Efficient Finetune (PEFT) with IA3 of JAT/Gato
+PEFT with IA3 of JAT/Gato on FINETUNE_NUM_DEMOS from an unseen TASK.
+```
+HF_DATASETS_OFFLINE=True \
+accelerate launch --main_process_port=${PORT} scripts_jat_regent/peft_jat_tokenized.py \
+--output_dir checkpoints/peft_jat_${TASK}_${FINETUNE_NUM_DEMOS} \
+--model_name_or_path checkpoints/jat \
+--tasks ${TASK} \
+--finetune_num_demos ${FINETUNE_NUM_DEMOS} \
+--run_name peft_jat_${TASK}_${FINETUNE_NUM_DEMOS} \
+--save_safetensors false \
+--trust_remote_code \
+--per_device_train_batch_size 8 \
+--gradient_accumulation_steps 1 \
+--save_strategy no \
+--logging_steps 10 \
+--logging_first_step \
+--dispatch_batches False \
+--dataloader_num_workers 16 \
+--max_steps 1000 \
+--warmup_steps 60 \
+--learning_rate 3e-3 \
+--optim adafactor
+```
+
+Evaluate on TASK for for NUM_EPS rollouts.
+```
+python -u scripts_jat_regent/eval_jat_peft.py \
+--model_name_or_path checkpoints/peft_jat_${TASK}_${FINETUNE_NUM_DEMOS} \
+--tasks ${TASK} --num_episodes ${NUM_EPS} --trust_remote_code
+```
+If you choose an atari-* task, please add `--sticky_p 0.05` if you'd like sticky probability in the environment.
+
+
+## DRIL
+Please see [dril/README.md](dril/README.md).
+
+
 ## Citation
 If you'd like to cite our work, please use:
 
