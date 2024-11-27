@@ -173,6 +173,21 @@ If you choose an atari-* task, please add `--sticky_p 0.05` if you'd like sticky
 Please see [dril/README.md](dril/README.md).
 
 
+## JAT/Gato + RAG
+Evaluate JAT/Gato with RAG at inference time on TASK, with NUM_DEMOS to retrieve from, for NUM_EPS rollouts.
+```
+python -u scripts_jat_regent/eval_jat.py \
+--model_name_or_path checkpoints/jat/<chosen checkpoint folder> \
+--tasks ${TASK} --num_episodes ${NUM_EPS} --trust_remote_code \
+--num_demos ${NUM_DEMOS}
+```
+If you choose an atari-* task, please add `--sticky_p 0.05` if you'd like sticky probability in the environment.
+
+
+## REGENT with Cosine Distance
+To swicth from l2 to cosine distance everywhere, please follows the instructions [described here](scripts_preprocessing/README.md#changes-to-be-made-for-regent-with-cosine-distance). Then redo the dataset processing, retrain REGENT, and evaluate.
+
+
 ## Citation
 If you'd like to cite our work, please use:
 

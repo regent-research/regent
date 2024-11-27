@@ -15,9 +15,18 @@ from transformers import AutoModelForCausalLM, AutoProcessor, HfArgumentParser
 
 from jat.eval.rl import TASK_NAME_TO_ENV_ID, make
 from jat.utils import normalize, push_to_hub, save_video_grid
-from regent.eval.rl import SEEN_TASK_NAME_TO_ENV_ID, UNSEEN_TASK_NAME_TO_ENV_ID
 from copy import deepcopy
 from regent.utils import myprint
+
+from datasets import load_from_disk
+from datasets.config import HF_DATASETS_CACHE
+from regent.utils import myprint, L2dist, atari_plotter, mujoco_plotter, metaworld_plotter
+from copy import deepcopy
+from datetime import datetime
+from regent.eval.rl import make_seen_and_unseen, UNSEEN_TASK_NAME_TO_ENV_ID, SEEN_TASK_NAME_TO_ENV_ID
+import matplotlib.pyplot as plt
+from jat.modeling_jat import JatModel
+from transformers import AutoConfig
 
 
 @dataclass
@@ -58,6 +67,7 @@ class EvaluationArguments:
     push_to_hub: bool = field(default=False, metadata={"help": "Push the model to the hub."})
     repo_id: Optional[str] = field(default=None, metadata={"help": "Repository ID to push to."})
     sticky_p: float = field(default=0.0, metadata={"help": "Sticky probability (currently for atari envs only)."})
+    num_demos: int = field(default=20, metadata={"help": "Number of episodes (aka demos) to retrieve from."})
 
 
 def get_default_device() -> torch.device:
@@ -175,9 +185,13 @@ def main():
     device = torch.device("cpu") if eval_args.use_cpu else get_default_device()
     
     # model
-    model = AutoModelForCausalLM.from_pretrained(
+    config = AutoConfig.from_pretrained(
         model_args.model_name_or_path, cache_dir=model_args.cache_dir, trust_remote_code=model_args.trust_remote_code
-    ).to(device)
+    )
+    model = JatModel(config)
+    model.load_state_dict(torch.load(f"{model_args.model_name_or_path}/pytorch_model.bin"))
+    model = model.to(device)
+
     processor = AutoProcessor.from_pretrained(
         model_args.model_name_or_path, cache_dir=model_args.cache_dir, trust_remote_code=model_args.trust_remote_code
     )
@@ -189,6 +203,14 @@ def main():
 
     for task in tqdm(tasks, desc="Evaluation", unit="task", leave=True):
         if task in TASK_NAME_TO_ENV_ID.keys():
+            #### new call retrieval setup
+            myprint(('-'*100) + f'{task=}')
+            dataset = load_from_disk(f'{HF_DATASETS_CACHE}/jat-project/jat-dataset-tokenized/{task}')
+            model.retrieval_setup(task, 
+                                  dataset, 
+                                  eval_args.num_demos,
+                                  device,)
+            
             scores, frames, fps = eval_rl(model, processor, task, eval_args)
             evaluations[task] = scores
             # Save the video

@@ -40,3 +40,12 @@ We combine the (retrieved) indices and distances and push to the `task_newdata` 
 ```
 python scripts_preprocessing/convert_bin_files_to_parquet_files_and_push_to_hf.py
 ```
+
+## Changes to be made for REGENT with cosine distance
+The aforementioned changes are as follows.
+* Please change `metric_type='l2'` to `metric_type='ip'` on line 606 of [regent/utils.py](regent/utils.py). This sets the retrieval index distance metric to inner product.
+* Uncomment line 596 in [regent/utils.py](regent/utils.py). This normalizes the embeddings/observations since cosine similarity is the inner product of normalized embeddings/observations.
+* Please change `return np.sqrt(np.sum((a - b)**2))` to `return 1.0-cosine_similarity(a,b)` on line 290 of [regent/utils.py](regent/utils.py). This is essential for computing the distance values and simply replaces the l2 distance with cosine distance.
+
+Then follow all of the above instructions to redo the processing of the training dataset with cosine distance instead of l2.
+ 

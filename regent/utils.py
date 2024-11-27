@@ -289,6 +289,13 @@ def L2dist(a: np.ndarray, b: np.ndarray):
     assert a.shape == b.shape, f'inputs to L2dist must have same shape. {a.shape=} {b.shape=}'
     return np.sqrt(np.sum((a - b)**2))
 
+def cosine_similarity(a: np.ndarray, b: np.ndarray):
+    assert a.shape == b.shape, f'inputs to cosine_similarity must have same shape. {a.shape=} {b.shape=}'
+    if len(a.shape) == 1:
+        return np.dot(a.flatten(), b.flatten()) / (np.linalg.norm(a) * np.linalg.norm(b))
+    else:
+        raise NotImplementedError(f'{a.shape=}')
+
 def process_row_of_obs_atari_full_without_mask(row_of_obs: np.ndarray | List) -> np.ndarray:
 
     if not isinstance(row_of_obs, np.ndarray):
@@ -584,6 +591,9 @@ def build_index_vector(all_rows_of_obs_OG,
                                                                             all_attn_masks_OG=all_attn_masks_OG,
                                                                             all_row_idxs=all_row_idxs,
                                                                             kwargs=kwargs)
+
+    # need to normalize for cosine
+    # all_processed_rows_of_obs = all_processed_rows_of_obs / np.linalg.norm(all_processed_rows_of_obs, axis=1, keepdims=True)
 
     # build index
     myprint(f'\n<Building index>\n')

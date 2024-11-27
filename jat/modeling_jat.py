@@ -13,6 +13,10 @@ from transformers.models.vit.modeling_vit import ViTPatchEmbeddings
 
 from .configuration_jat import JatConfig
 from .processing_jat import JatProcessor
+from regent.utils import build_index_vector, get_task_info, collect_all_data, process_row_of_obs_atari_full_without_mask, retrieve_vector, myprint, L2dist, get_dist_stats, get_images_of_retrieved_obs, get_emb_transform_model_dim, get_optional_suffix
+from regent.atari_utils import convert_local_to_global_action, convert_global_to_local_action
+from regent.eval.rl import SEEN_TASK_NAME_TO_ENV_ID, UNSEEN_TASK_NAME_TO_ENV_ID
+from copy import deepcopy
 
 
 def compute_mse_loss(
@@ -404,6 +408,99 @@ class JatModel(GPTNeoPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
+    def retrieval_setup(self,
+                        task,
+                        dataset, 
+                        num_demos, # to retrieve from
+                        device,
+                        batch_size_retrieval=16, # for atari envs on gpu
+                        nb_cores_autofaiss=8, # for vector obs envs on cpu cores
+    ):
+        # for retrieval config
+        self.atari_dist_type = "resnet18_512"
+        self.finetune_num_demos = None
+        self.use_global_atari_actions = False
+
+        # setup
+        rew_key, attn_key, obs_key, act_key, B, obs_dim, act_dim = get_task_info(task)
+        extra_key = 'discrete_RandP_action_logits' if task.startswith("atari") or task.startswith("babyai") else 'continuous_RandP_actions'
+        optional_suffix = get_optional_suffix(task, self.atari_dist_type, self.finetune_num_demos)
+        mean_dist, std_dist, max_dist, p80, p85, p90, p95, p99 = get_dist_stats(task=task, optional_suffix=optional_suffix)
+        
+        # get embedding model
+        if task.startswith("atari"):
+            self.emb_transform, self.emb_model, emb_dim, self.emb_model_full = get_emb_transform_model_dim(self.atari_dist_type, self.device, return_emb_weights=True)
+            obs_dim = emb_dim # overwrite for atari_dist_type
+
+        kwargs = {'B': B,
+              'obs_dim': obs_dim,
+              'attn_key': attn_key,
+              'obs_key': obs_key,
+              'device': device,
+              'task': task,
+              'batch_size_retrieval': batch_size_retrieval,
+              'nb_cores_autofaiss': nb_cores_autofaiss,
+              'verbose': False,
+              'atari_dist_type': self.atari_dist_type,
+            }
+        raw_obs_dim = obs_dim
+        if task.startswith("atari"): # overwrite raw_obs_dim because raw obs in atari are (4, 84, 84) and raw obs in babyai have 64 extra dim
+            raw_obs_dim = (4, 84, 84)
+        elif task.startswith("babyai"):
+            raw_obs_dim = (obs_dim[0]+64,)
+        
+        # save
+        self.task = task
+        self.dataset = dataset
+        self.obs_key = obs_key
+        self.act_key = act_key
+        self.rew_key = rew_key
+        self.attn_key = attn_key
+        self.obs_dim = obs_dim
+        self.act_dim = act_dim
+        self.extra_key = extra_key
+        self.kwargs = kwargs
+        self.raw_obs_dim = raw_obs_dim
+        self.max_dist = max_dist
+        self.mean_dist = mean_dist
+        self.std_dist = std_dist
+        self.p80, self.p85, self.p90, self.p95, self.p99 = p80, p85, p90, p95, p99
+        
+        # for retrieval,
+        all_rows_of_obs_OG, all_attn_masks_OG, all_row_idxs, all_datarows_dict = collect_all_data(dataset, task, obs_key, num_demos, return_datarows_dict=True, atari_dist_type=self.atari_dist_type)
+        if task.startswith("babyai"):
+            # for each mission in task,
+            self.all_indices = {}
+            self.knn_index = {}
+            for mission_idx, mission in enumerate(all_row_idxs.keys()):
+                # create index, collect subset of data that we can retrieve from
+                myprint(('*'*50) + f'{mission=} - {mission_idx+1}/{len(all_row_idxs.keys())}')
+                self.all_indices[mission], self.knn_index[mission] = build_index_vector(all_rows_of_obs_OG=all_rows_of_obs_OG[mission],
+                                                                                        all_attn_masks_OG=all_attn_masks_OG[mission],
+                                                                                        all_row_idxs=all_row_idxs[mission],
+                                                                                        kwargs=kwargs)
+        else:
+            # create index, collect subset of data that we can retrieve from
+            self.all_indices, self.knn_index = build_index_vector(all_rows_of_obs_OG=all_rows_of_obs_OG,
+                                                                  all_attn_masks_OG=all_attn_masks_OG,
+                                                                  all_row_idxs=all_row_idxs,
+                                                                  kwargs=kwargs)
+        
+        # for retrieval inside retrieve()
+        self.datarows = all_datarows_dict
+            
+
+        # # for checking if first env state is similar to retrieval episode's first states
+        # if task.startswith("mujoco"):
+        #     local_path = f"dataset_jat_regent/{task}"
+        #     with open(f"{local_path}/eps_2_rows_tokenized.json", 'r') as f:
+        #         eps_2_rows_tokenized = json.load(f)
+        #     eps_2_rows_tokenized = {int(k): v for k, v in eps_2_rows_tokenized.items()}
+        #     row_idxs_of_first_state_of_demos = [eps_2_rows_tokenized[eps][0] for eps in range(num_demos)]
+        #     self.first_states_of_demos = [np.array(dataset['train'][row_idx][obs_key][0]) for row_idx in row_idxs_of_first_state_of_demos]
+        # else:
+        #     self.first_states_of_demos = None
+
     def embed_textual(
         self,
         input_ids: Optional[LongTensor],
@@ -700,6 +797,74 @@ class JatModel(GPTNeoPreTrainedModel):
         self.last_discrete_action = None
         self.last_continuous_action = None
         self.last_reward = None
+        self.steps = 0
+
+    def retrieve(
+        self,
+        all_processed: List[dict],
+        num_to_retrieve: int,
+    ):
+        self.steps += 1
+        # Set num envs
+        num_envs = len(all_processed)
+
+        # Get obs from processed and make batch
+        row_of_obs = [all_processed[idx][self.obs_key][0].numpy() for idx in range(num_envs)]
+        row_of_obs = np.concatenate(row_of_obs)
+        assert row_of_obs.shape == (num_envs, *self.raw_obs_dim) and isinstance(row_of_obs, np.ndarray)
+        if self.task.startswith("atari"):
+            row_of_obs = process_row_of_obs_atari_full_without_mask(row_of_obs)
+            row_of_obs = torch.from_numpy(row_of_obs).to(self.device)
+            with torch.no_grad():
+                row_of_obs = self.emb_model(self.emb_transform(row_of_obs)).cpu().numpy()
+        elif self.task.startswith("babyai"):
+            row_of_obs = row_of_obs[:, :148] # removing last 64 text tokens
+        assert row_of_obs.shape == (num_envs, *self.obs_dim) and isinstance(row_of_obs, np.ndarray)
+
+        # Retrieve indices
+        if self.task.startswith("babyai"):
+            retrieved_indices = []
+            for idx in range(num_envs):
+                mission = all_processed[idx]['mission']
+                retrieved_indices_mission = retrieve_vector(row_of_obs=row_of_obs[idx:idx+1],
+                                                            knn_index=self.knn_index[mission], 
+                                                            all_indices=self.all_indices[mission], 
+                                                            num_to_retrieve=num_to_retrieve,
+                                                            kwargs=self.kwargs)
+                retrieved_indices.append(retrieved_indices_mission) # appending (1, 1, 2)
+            retrieved_indices = np.concatenate(retrieved_indices, axis=0)
+            assert retrieved_indices.shape == (num_envs, num_to_retrieve, 2)
+        else:
+            retrieved_indices = retrieve_vector(row_of_obs=row_of_obs, 
+                                                knn_index=self.knn_index, 
+                                                all_indices=self.all_indices, 
+                                                num_to_retrieve=num_to_retrieve,
+                                                kwargs=self.kwargs)
+
+        # Return action
+        all_retrieved_act = []
+        all_retrieved_obs = []
+        all_retrieved_rew = []
+        env_idx = 0
+        for all_row_idx_and_i in retrieved_indices:
+            all_retrieved_act.append([])
+            all_retrieved_obs.append([])
+            all_retrieved_rew.append([])
+            for row_idx, i in all_row_idx_and_i:
+                if self.task.startswith("babyai"):
+                    mission = all_processed[env_idx]['mission']
+                    datarow = self.datarows[mission][int(row_idx)]
+                else:
+                    datarow = self.datarows[int(row_idx)]
+                temp_a = datarow[self.act_key][int(i)]
+                if self.task.startswith("atari") and self.use_global_atari_actions:
+                    temp_a = convert_local_to_global_action( temp_a, self.task )
+                all_retrieved_act[-1].append(temp_a)
+                all_retrieved_obs[-1].append(datarow[self.obs_key][int(i)])
+                all_retrieved_rew[-1].append(datarow[self.rew_key][int(i)])
+            env_idx += 1
+
+        return all_retrieved_act, all_retrieved_obs, all_retrieved_rew, row_of_obs
 
     @torch.no_grad()
     def get_next_action(
@@ -740,34 +905,35 @@ class JatModel(GPTNeoPreTrainedModel):
         discrete_actions = [fake_discrete_action] if fake_discrete_action is not None else None
         rewards = [reward] if reward is not None else [0.0]
 
-        if self._last_key_values is not None:
-            # We concatenate the last observation with the current one
-            continuous_observations = (
-                [self.last_continuous_observation] + continuous_observations
-                if continuous_observations is not None
-                else None
-            )
-            discrete_observations = (
-                [self.last_discrete_observation] + discrete_observations if discrete_observations is not None else None
-            )
-            text_observations = (
-                [self.last_text_observation] + text_observations if text_observations is not None else None
-            )
-            image_observations = (
-                [self.last_image_observation] + image_observations if image_observations is not None else None
-            )
-            continuous_actions = (
-                [self.last_continuous_action] + continuous_actions if continuous_actions is not None else None
-            )
-            discrete_actions = [self.last_discrete_action] + discrete_actions if discrete_actions is not None else None
-            rewards = [self.last_reward] + rewards
+        #### new comment out last stuff
+        # if self._last_key_values is not None:
+        #     # We concatenate the last observation with the current one
+        #     continuous_observations = (
+        #         [self.last_continuous_observation] + continuous_observations
+        #         if continuous_observations is not None
+        #         else None
+        #     )
+        #     discrete_observations = (
+        #         [self.last_discrete_observation] + discrete_observations if discrete_observations is not None else None
+        #     )
+        #     text_observations = (
+        #         [self.last_text_observation] + text_observations if text_observations is not None else None
+        #     )
+        #     image_observations = (
+        #         [self.last_image_observation] + image_observations if image_observations is not None else None
+        #     )
+        #     continuous_actions = (
+        #         [self.last_continuous_action] + continuous_actions if continuous_actions is not None else None
+        #     )
+        #     discrete_actions = [self.last_discrete_action] + discrete_actions if discrete_actions is not None else None
+        #     rewards = [self.last_reward] + rewards
 
-        # Store the last observation
-        self.last_continuous_observation = continuous_observations[-1] if continuous_observations is not None else None
-        self.last_discrete_observation = discrete_observations[-1] if discrete_observations is not None else None
-        self.last_text_observation = text_observations[-1] if text_observations is not None else None
-        self.last_image_observation = image_observations[-1] if image_observations is not None else None
-        self.last_reward = rewards[-1]
+        # # Store the last observation
+        # self.last_continuous_observation = continuous_observations[-1] if continuous_observations is not None else None
+        # self.last_discrete_observation = discrete_observations[-1] if discrete_observations is not None else None
+        # self.last_text_observation = text_observations[-1] if text_observations is not None else None
+        # self.last_image_observation = image_observations[-1] if image_observations is not None else None
+        # self.last_reward = rewards[-1]
 
         # Add the batch dimension
         continuous_observations = [continuous_observations] if continuous_observations is not None else None
@@ -792,25 +958,78 @@ class JatModel(GPTNeoPreTrainedModel):
             max_length=max_length,
             return_tensors="pt",
         )
-        processed.to(self.device)
+        #### new comment out to device
+        # processed.to(self.device)
+
+        #### new post processing from regent
+        assert (((self.act_key == 'continuous_actions' and processed[self.act_key].shape == (1, 1, self.act_dim)) or # zeros
+                 (self.act_key == 'discrete_actions' and processed[self.act_key].shape == (1, 1))) and
+                processed[self.obs_key].shape == (1, 1, *self.raw_obs_dim) and
+                processed[self.rew_key].shape == (1, 1)), f'{processed[self.act_key].shape=}, {processed[self.obs_key].shape=}, {processed[self.rew_key].shape=}, {self.act_dim=}, {self.raw_obs_dim=}'
+
+        #### new retrieval
+        all_processed = [processed]
+        num_envs = len(all_processed)
+        num_contexts = 20
+        all_retrieved_act, all_retrieved_obs, all_retrieved_rew, row_of_obs = self.retrieve(all_processed, num_to_retrieve=num_contexts - 1)
+
+        # Batch retrieved data
+        all_retrieved_obs = np.stack(all_retrieved_obs).astype(np.int32 if self.obs_key == 'discrete_observations' else np.float32)
+        assert all_retrieved_obs.shape == (num_envs, num_contexts - 1, *self.raw_obs_dim), f'{all_retrieved_obs.shape=}, {num_envs=}, {self.raw_obs_dim=}, {num_contexts-1=}'
+        all_retrieved_act = np.stack(all_retrieved_act).astype(np.int32 if self.act_key == 'discrete_actions' else np.float32)
+        all_retrieved_rew = np.stack(all_retrieved_rew).astype(np.float32)
+        assert (((self.act_key == 'continuous_actions' and all_retrieved_act.shape == (num_envs, num_contexts - 1, self.act_dim)) or 
+                 (self.act_key == 'discrete_actions' and all_retrieved_act.shape == (num_envs, num_contexts - 1))) and
+                all_retrieved_rew.shape == (num_envs, num_contexts - 1)), f'{all_retrieved_act.shape=}, {all_retrieved_rew.shape=}, {num_envs=}, {self.act_dim=}, {self.raw_obs_dim=}, {num_contexts-1=}'
+
+        # Batch query data (already tensors) # query data is already int32/float32 after processing
+        all_query_act = torch.stack([all_processed[idx][self.act_key][0] for idx in range(num_envs)])
+        all_query_obs = np.stack([all_processed[idx][self.obs_key][0] for idx in range(num_envs)])
+        all_query_rew = torch.stack([all_processed[idx][self.rew_key][0] for idx in range(num_envs)])
+        assert (((self.act_key == 'continuous_actions' and all_query_act.shape == (num_envs, 1, self.act_dim)) or 
+                 (self.act_key == 'discrete_actions' and all_query_act.shape == (num_envs, 1))) and
+                all_query_obs.shape == (num_envs, 1, *self.raw_obs_dim) and
+                all_query_rew.shape == (num_envs, 1)), f'{all_query_act.shape=}, {all_query_obs.shape=}, {all_query_rew.shape=}, {num_envs=}, {self.act_dim=}, {self.raw_obs_dim=}'
+
+        # Collect attn
+        attn_weights = np.ones((num_envs, num_contexts)).astype(np.float32)
+
+        # Tensorify
+        all_retrieved_act = torch.from_numpy(all_retrieved_act)
+        all_retrieved_rew = torch.from_numpy(all_retrieved_rew)
+        attn_weights = torch.from_numpy(attn_weights).to(self.device)
+
+        # Concat retrieved and query batches
+        all_act = torch.cat([all_retrieved_act, all_query_act], dim=1).to(self.device)
+        all_obs = np.concatenate([all_retrieved_obs, all_query_obs], axis=1)
+        all_obs = torch.from_numpy(all_obs).to(self.device)
+        all_rew = torch.cat([all_retrieved_rew, all_query_rew], dim=1).to(self.device)
+
+        #### end new retrieval
 
         # Forward pass
-        outputs = self(**processed, past_key_values=self._last_key_values, return_loss=False)
+        # outputs = self(**processed, past_key_values=self._last_key_values, return_loss=False)
+        
+        outputs = self(**{self.obs_key: all_obs, 
+                        self.act_key: all_act,
+                        self.rew_key: all_rew,
+                        self.attn_key: attn_weights}, return_loss=False)
 
-        # Truncate the past key-values
-        self._last_key_values = tuple(
-            tuple(pkv[:, :, -self.config.max_position_embeddings + 2 :] for pkv in pkvs)
-            for pkvs in outputs.past_key_values
-        )
-        # Store the last key values
-        # We remove the last two values, as the inputs are [s_0, 0], [s_0, a_0, s_1, 0], [s_1, a_1, s_2, 0], ...
-        self._last_key_values = tuple(tuple(pkv[:, :, :-2] for pkv in pkvs) for pkvs in self._last_key_values)
+        #### new comment out last stuff
+        # # Truncate the past key-values
+        # self._last_key_values = tuple(
+        #     tuple(pkv[:, :, -self.config.max_position_embeddings + 2 :] for pkv in pkvs)
+        #     for pkvs in outputs.past_key_values
+        # )
+        # # Store the last key values
+        # # We remove the last two values, as the inputs are [s_0, 0], [s_0, a_0, s_1, 0], [s_1, a_1, s_2, 0], ...
+        # self._last_key_values = tuple(tuple(pkv[:, :, :-2] for pkv in pkvs) for pkvs in self._last_key_values)
 
-        # Context window
-        if context_window is not None:
-            self._last_key_values = tuple(
-                tuple(pkv[:, :, -context_window:] for pkv in pkvs) for pkvs in self._last_key_values
-            )
+        # # Context window
+        # if context_window is not None:
+        #     self._last_key_values = tuple(
+        #         tuple(pkv[:, :, -context_window:] for pkv in pkvs) for pkvs in self._last_key_values
+        #     )
 
         # Return the predicted action
         if continuous_actions is not None:
