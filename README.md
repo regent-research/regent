@@ -1,5 +1,7 @@
 # REGENT: A Retrieval-Augmented Generalist Agent That Can Act in-Context In New Environments
 
+* [arXiv](https://arxiv.org/abs/2412.04759)
+* [Website](https://kaustubhsridhar.github.io/regent-research/)
 * [REGENT on Huggingface](https://huggingface.co/regent-research)
 * [REGENT checkpoint on HuggingFace](https://huggingface.co/regent-research/regent-medium-embeddings)
 * [REGENT dataset on HuggingFace](https://huggingface.co/datasets/regent-research/regent-subset-of-jat-dataset-tokenized)
